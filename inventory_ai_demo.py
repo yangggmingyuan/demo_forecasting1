@@ -5,6 +5,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 import time
 import os
+import json
+from typing import List, Dict, Optional
+
+# 尝试导入 Google Gemini
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    st.warning("⚠️ 未安装 google-generativeai 库，请运行: pip install google-generativeai")
 
 # ==========================================
 # 1. 页面配置与 CSS 美化 (全局生效)
@@ -49,6 +59,173 @@ st.markdown("""
         box-shadow: 0 5px 15px rgba(0,0,0,0.1);
         border-color: #4e73df;
     }
+    /* 浮动聊天窗口样式 */
+    .chat-widget-container {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        z-index: 1000;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .chat-launcher {
+        width: 60px;
+        height: 60px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #ff6b9d, #ff8fab);
+        box-shadow: 0 4px 12px rgba(255, 107, 157, 0.4);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: transform 0.3s, box-shadow 0.3s;
+        border: none;
+        color: white;
+        font-size: 24px;
+    }
+    .chat-launcher:hover {
+        transform: scale(1.1);
+        box-shadow: 0 6px 20px rgba(255, 107, 157, 0.6);
+    }
+    .chat-window {
+        position: fixed;
+        bottom: 90px;
+        right: 20px;
+        width: 380px;
+        height: 600px;
+        background: white;
+        border-radius: 16px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        z-index: 1001;
+        animation: slideUp 0.3s ease-out;
+    }
+    @keyframes slideUp {
+        from {
+            opacity: 0;
+            transform: translateY(20px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    .chat-header {
+        background: white;
+        padding: 16px 20px;
+        border-bottom: 1px solid #e5e5e5;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .chat-header-left {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .chat-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #ff6b9d, #ff8fab);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: 20px;
+    }
+    .chat-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: #333;
+    }
+    .chat-close {
+        background: none;
+        border: none;
+        font-size: 20px;
+        color: #666;
+        cursor: pointer;
+        padding: 4px;
+        line-height: 1;
+    }
+    .chat-close:hover {
+        color: #333;
+    }
+    .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+        background: #f8f9fa;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+    .message-assistant {
+        align-self: flex-start;
+        max-width: 75%;
+        background: #e9ecef;
+        padding: 12px 16px;
+        border-radius: 18px;
+        font-size: 14px;
+        color: #333;
+        line-height: 1.5;
+    }
+    .message-user {
+        align-self: flex-end;
+        max-width: 75%;
+        background: linear-gradient(135deg, #ff6b9d, #ff8fab);
+        padding: 12px 16px;
+        border-radius: 18px;
+        font-size: 14px;
+        color: white;
+        line-height: 1.5;
+    }
+    .message-time {
+        font-size: 11px;
+        color: #999;
+        margin-top: 4px;
+        text-align: right;
+    }
+    .chat-input-area {
+        padding: 16px;
+        background: white;
+        border-top: 1px solid #e5e5e5;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+    .chat-input {
+        flex: 1;
+        padding: 10px 16px;
+        border: 1px solid #e5e5e5;
+        border-radius: 24px;
+        font-size: 14px;
+        outline: none;
+    }
+    .chat-input:focus {
+        border-color: #ff6b9d;
+    }
+    .chat-send {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #ff6b9d, #ff8fab);
+        border: none;
+        color: white;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        transition: transform 0.2s;
+    }
+    .chat-send:hover {
+        transform: scale(1.1);
+    }
+    .chat-send:active {
+        transform: scale(0.95);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -59,37 +236,264 @@ if 'current_page' not in st.session_state:
     st.session_state['current_page'] = 'Home'
 if 'df_data' not in st.session_state:
     st.session_state['df_data'] = None
+# LLM 相关 Session State
+if 'chat_messages' not in st.session_state:
+    st.session_state['chat_messages'] = []
+if 'gemini_api_key' not in st.session_state:
+    # 从环境变量读取 API Key，如果没有则使用空字符串
+    st.session_state['gemini_api_key'] = os.getenv('GEMINI_API_KEY', '')
+if 'gemini_model' not in st.session_state:
+    st.session_state['gemini_model'] = 'gemini-pro'
+if 'chat_window_open' not in st.session_state:
+    st.session_state['chat_window_open'] = False
+if 'llm_provider' not in st.session_state:
+    st.session_state['llm_provider'] = 'gemini'
 
 # ==========================================
-# 3. 核心功能函数 (AI 逻辑)
+# 3. LLM 功能函数 (Gemini 集成)
 # ==========================================
-def analyze_data_with_ai(df, customer_type):
-    """【仿真 AI 引擎】模拟大模型思维链"""
-    total_act = df['Actual_Qty'].sum()
-    total_fcst = df['Forecast_Qty'].sum()
-    bias = (total_fcst - total_act) / total_act if total_act != 0 else 0
+
+def get_page_context() -> str:
+    """获取当前页面上下文信息，用于 LLM 提示"""
+    context = f"当前页面: {st.session_state.get('current_page', 'Home')}\n"
     
-    report = f"**🤖 AI Deep Insight Report ({customer_type})**\n\n"
-    report += "**1. Current Diagnosis:**\n"
-    if bias > 0.15:
-        report += f"Detected a significant **Bullwhip Effect**. Forecast ({int(total_fcst):,}) exceeds demand ({int(total_act):,}) by **{bias:.1%}**.\n"
-    elif bias < -0.10:
-        report += f"Detected **under-forecasting**. Actual shipments exceed forecasts by {abs(bias):.1%}.\n"
-    else:
-        report += f"Supply and demand are well matched, bias within {bias:.1%}.\n"
+    df = st.session_state.get('df_data')
+    if df is not None:
+        context += f"数据概览: 共 {len(df)} 行记录\n"
+        context += f"数据列: {', '.join(df.columns.tolist())}\n"
         
-    report += "\n**2. Pattern Recognition:**\n"
-    if customer_type == "TOP":
-        report += "Algorithm detects **quarterly pulses**. Recommend shifting to **Collaborative Planning (CPFR)**.\n"
-    else:
-        report += "Demand shows **Poisson-like** pattern. Consider **risk pooling** strategies.\n"
+        # 根据当前页面添加特定信息
+        current_page = st.session_state.get('current_page', 'Home')
+        if current_page == 'Customer Analysis':
+            # 可以添加当前选中的客户信息等
+            pass
+        elif current_page == 'Data Analysis':
+            # 可以添加当前筛选条件等
+            pass
+    
+    return context
 
-    report += "\n**3. AI Strategy Suggestions:**\n"
-    if bias > 0.10:
-        report += f"💡 **Cost Reduction**: Suggest reducing DOI to **{int(30/(1+bias))} days**, freeing **15%-20%** working capital."
+def call_gemini(messages: List[Dict], api_key: str, model: str = 'gemini-pro') -> Optional[str]:
+    """调用 Google Gemini API"""
+    if not GEMINI_AVAILABLE:
+        return "❌ 未安装 google-generativeai 库，请运行: pip install google-generativeai"
+    
+    if not api_key:
+        return "❌ 请设置环境变量 GEMINI_API_KEY。获取 API Key: https://makersuite.google.com/app/apikey"
+    
+    try:
+        genai.configure(api_key=api_key)
+        model_instance = genai.GenerativeModel(model)
+        
+        # 将消息格式转换为 Gemini 格式
+        # Gemini 使用简单的 prompt 格式，我们需要将对话历史转换为单一 prompt
+        prompt_parts = []
+        for msg in messages:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            if role == 'system':
+                prompt_parts.append(content)
+            elif role == 'user':
+                prompt_parts.append(f"用户: {content}")
+            elif role == 'assistant':
+                prompt_parts.append(f"助手: {content}")
+        
+        # 生成响应
+        response = model_instance.generate_content('\n'.join(prompt_parts))
+        return response.text
+    except Exception as e:
+        return f"❌ Gemini API 调用失败: {str(e)}"
+
+def chat_with_llm(user_message: str, provider: str = 'gemini') -> str:
+    """与 LLM 进行对话"""
+    # 获取页面上下文
+    page_context = get_page_context()
+    
+    # 构建系统提示
+    system_prompt = f"""你是一个专业的供应链数据分析助手。你的任务是帮助用户理解供应链数据和分析结果。
+
+当前上下文信息:
+{page_context}
+
+请用中文回答用户的问题，提供专业、清晰的分析和建议。"""
+    
+    # 初始化消息列表（如果为空）
+    if not st.session_state['chat_messages']:
+        st.session_state['chat_messages'] = [
+            {'role': 'system', 'content': system_prompt}
+        ]
+    
+    # 添加用户消息
+    st.session_state['chat_messages'].append({
+        'role': 'user',
+        'content': user_message
+    })
+    
+    # 调用 LLM
+    if provider == 'gemini':
+        response = call_gemini(
+            st.session_state['chat_messages'],
+            st.session_state['gemini_api_key'],
+            st.session_state['gemini_model']
+        )
     else:
-        report += "💡 **Supply Assurance**: Recommend dynamic buffer inventory for peak seasons."
-    return report
+        response = "❌ 不支持的 LLM 提供商"
+    
+    # 添加助手回复
+    if response:
+        st.session_state['chat_messages'].append({
+            'role': 'assistant',
+            'content': response
+        })
+    
+    return response
+
+def render_chat_sidebar():
+    """侧边栏占位函数（已移除配置选项，API Key 从环境变量读取）"""
+    # 配置选项已移除，API Key 从环境变量 GEMINI_API_KEY 读取
+    pass
+
+def toggle_chat_window():
+    """切换聊天窗口显示状态"""
+    st.session_state['chat_window_open'] = not st.session_state['chat_window_open']
+
+def close_chat_window():
+    """关闭聊天窗口"""
+    st.session_state['chat_window_open'] = False
+
+def render_floating_chat():
+    """渲染浮动聊天窗口"""
+    # 聊天启动按钮
+    if not st.session_state['chat_window_open']:
+        # 添加浮动按钮
+        st.markdown("""
+        <style>
+            .floating-chat-launcher {
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                z-index: 1000;
+            }
+            .floating-chat-launcher-btn {
+                width: 60px;
+                height: 60px;
+                border-radius: 50%;
+                background: linear-gradient(135deg, #ff6b9d, #ff8fab);
+                box-shadow: 0 4px 12px rgba(255, 107, 157, 0.4);
+                border: none;
+                color: white;
+                font-size: 24px;
+                cursor: pointer;
+                transition: transform 0.3s, box-shadow 0.3s;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .floating-chat-launcher-btn:hover {
+                transform: scale(1.1);
+                box-shadow: 0 6px 20px rgba(255, 107, 157, 0.6);
+            }
+        </style>
+        <div class="floating-chat-launcher">
+            <button class="floating-chat-launcher-btn" id="chatLauncherBtn">💬</button>
+        </div>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                const btn = document.getElementById('chatLauncherBtn');
+                if (btn) {
+                    btn.onclick = function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        // 使用 URL 参数触发 Streamlit 重新运行
+                        const baseUrl = window.location.href.split('?')[0];
+                        const newUrl = baseUrl + '?openChat=true&_t=' + Date.now();
+                        window.location.href = newUrl;
+                        return false;
+                    };
+                }
+            });
+        </script>
+        """, unsafe_allow_html=True)
+    
+    # 聊天窗口
+    if st.session_state['chat_window_open']:
+        # 构建消息HTML
+        messages_html = ""
+        chat_display = [m for m in st.session_state['chat_messages'] if m.get('role') != 'system'][-20:]  # 显示最后20条消息
+        
+        for msg in chat_display:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '').replace('\n', '<br>').replace('"', '&quot;')
+            if role == 'user':
+                messages_html += f'<div class="message-user">{content}</div>'
+            elif role == 'assistant':
+                messages_html += f'<div class="message-assistant">{content}</div>'
+        
+        # 如果没有消息，显示欢迎消息
+        if not messages_html:
+            messages_html = '<div class="message-assistant">你好！👋 我是供应链 AI 助手，有什么可以帮助你的吗？</div>'
+        
+        st.markdown(f"""
+        <div class="chat-widget-container">
+            <div class="chat-window">
+                <div class="chat-header">
+                    <div class="chat-header-left">
+                        <div class="chat-icon">✨</div>
+                        <div class="chat-title">AI 智能助手</div>
+                    </div>
+                    <button class="chat-close" id="closeChatBtn">×</button>
+                </div>
+                <div class="chat-messages" id="chatMessages">
+                    {messages_html}
+                </div>
+                <div class="chat-input-area">
+                    <input type="text" class="chat-input" id="chatInput" placeholder="输入您的问题...">
+                    <button class="chat-send" id="sendBtn">➤</button>
+                </div>
+            </div>
+        </div>
+        <script>
+            // 自动滚动到底部
+            setTimeout(function() {{
+                const messagesDiv = document.getElementById('chatMessages');
+                if (messagesDiv) {{
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                }}
+            }}, 100);
+            
+            // 关闭按钮 - 使用 Streamlit 通信
+            document.getElementById('closeChatBtn').addEventListener('click', function() {{
+                // 通过隐藏的 Streamlit 组件触发关闭
+                const event = new CustomEvent('streamlit:closeChat');
+                window.parent.postMessage({{type: 'streamlit:setComponentValue', value: 'close'}}, '*');
+                // 备用方案：使用 URL 参数
+                const baseUrl = window.location.href.split('?')[0];
+                window.location.href = baseUrl + '?closeChat=true&t=' + Date.now();
+            }});
+            
+            // 发送按钮
+            document.getElementById('sendBtn').addEventListener('click', function() {{
+                sendMessage();
+            }});
+            
+            // Enter 键发送
+            document.getElementById('chatInput').addEventListener('keypress', function(e) {{
+                if (e.key === 'Enter') {{
+                    e.preventDefault();
+                    sendMessage();
+                }}
+            }});
+            
+            function sendMessage() {{
+                const input = document.getElementById('chatInput');
+                const message = input.value.trim();
+                if (message) {{
+                    const baseUrl = window.location.href.split('?')[0];
+                    window.location.href = baseUrl + '?sendMessage=' + encodeURIComponent(message) + '&t=' + Date.now();
+                }}
+            }}
+        </script>
+        """, unsafe_allow_html=True)
 
 # ==========================================
 # 4. 页面定义
@@ -154,7 +558,7 @@ def page_home():
 
 # --- 4.2 页面一：数据分析 (原来的主代码) ---
 def page_data_analysis():
-    st.sidebar.button("🏠 返回主页", on_click=navigate_to, args=('Home',), use_container_width=True)
+    st.button("🏠 返回主页", on_click=navigate_to, args=('Home',), use_container_width=True)
     st.markdown("# 📊 全景数据分析")
     
     df = st.session_state['df_data']
@@ -194,31 +598,17 @@ def page_data_analysis():
 
     st.markdown("---")
 
-    # 3. 图表与 AI
-    c1, c2 = st.columns([2, 1])
-    
-    with c1:
-        st.subheader("📈 供需趋势对比")
-        daily_chart = filtered_df.groupby('Date')[["Actual_Qty", "Forecast_Qty"]].sum().reset_index()
-        fig_trend = px.line(daily_chart, x='Date', y=['Actual_Qty', 'Forecast_Qty'], 
-                            color_discrete_map={"Actual_Qty": "#3366cc", "Forecast_Qty": "#ff9900"})
-        fig_trend.update_layout(legend=dict(orientation="h", y=1.1))
-        st.plotly_chart(fig_trend, use_container_width=True)
-
-    with c2:
-        st.subheader("🤖 AI 智能解读")
-        st.image("https://cdn-icons-png.flaticon.com/512/4712/4712027.png", width=60)
-        if st.button("✨ 生成分析报告"):
-            with st.spinner("AI 正在思考..."):
-                time.sleep(1)
-                insight = analyze_data_with_ai(filtered_df, selected_type)
-                st.markdown(f'<div class="ai-box" style="font-size:0.9em;">{insight}</div>', unsafe_allow_html=True)
-        else:
-            st.info("点击按钮，让 AI 基于当前筛选数据生成诊断报告。")
+    # 3. 图表
+    st.subheader("📈 供需趋势对比")
+    daily_chart = filtered_df.groupby('Date')[["Actual_Qty", "Forecast_Qty"]].sum().reset_index()
+    fig_trend = px.line(daily_chart, x='Date', y=['Actual_Qty', 'Forecast_Qty'], 
+                        color_discrete_map={"Actual_Qty": "#3366cc", "Forecast_Qty": "#ff9900"})
+    fig_trend.update_layout(legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(fig_trend, use_container_width=True)
 
 # --- 4.3 页面二：客户分析 ---
 def page_customer_analysis():
-    st.sidebar.button("🏠 返回主页", on_click=navigate_to, args=('Home',), use_container_width=True)
+    st.button("🏠 返回主页", on_click=navigate_to, args=('Home',), use_container_width=True)
     st.markdown("# 👤 客户专项分析")
     
     df = st.session_state['df_data']
@@ -436,7 +826,7 @@ def page_customer_analysis():
 
 # --- 4.4 页面三：库存策略 (Placeholder) ---
 def page_inventory_strategy():
-    st.sidebar.button("🏠 返回主页", on_click=navigate_to, args=('Home',), use_container_width=True)
+    st.button("🏠 返回主页", on_click=navigate_to, args=('Home',), use_container_width=True)
     st.title("📦 库存策略中心")
     
     st.info("🚧 此模块正在开发中...")
@@ -455,13 +845,42 @@ def page_inventory_strategy():
         st.number_input("持有成本 (%)", 10)
 
 # ==========================================
-# 5. 主程序入口 (路由控制)
+# 6. 主程序入口 (路由控制)
 # ==========================================
 def main():
-    # 侧边栏显示当前状态
-    if st.session_state['current_page'] != 'Home':
-        st.sidebar.markdown(f"**当前页面:** {st.session_state['current_page']}")
-        st.sidebar.markdown("---")
+    # 渲染侧边栏配置
+    render_chat_sidebar()
+    
+    # 处理聊天窗口控制（使用 query_params）
+    # 检查是否有 openChat 参数
+    if hasattr(st, 'query_params'):
+        if 'openChat' in st.query_params:
+            if not st.session_state.get('_chat_opened', False):
+                st.session_state['chat_window_open'] = True
+                st.session_state['_chat_opened'] = True
+                st.rerun()
+        
+        # 检查是否有 closeChat 参数
+        if 'closeChat' in st.query_params:
+            if st.session_state.get('_chat_opened', False):
+                st.session_state['chat_window_open'] = False
+                st.session_state['_chat_opened'] = False
+                st.rerun()
+        
+        # 处理发送消息
+        if 'sendMessage' in st.query_params:
+            user_message = st.query_params['sendMessage']
+            if user_message:
+                provider = st.session_state.get('llm_provider', 'gemini')
+                response = chat_with_llm(user_message, provider)
+                st.rerun()
+    else:
+        # 如果 query_params 不可用，初始化标记
+        if '_chat_opened' not in st.session_state:
+            st.session_state['_chat_opened'] = False
+    
+    # 渲染浮动聊天窗口
+    render_floating_chat()
 
     # 路由逻辑
     if st.session_state['current_page'] == 'Home':
